@@ -9,14 +9,14 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:video_player/video_player.dart';
-import 'package:device_info_plus/device_info_plus.dart'; // <-- ADDED
+import 'package:device_info_plus/device_info_plus.dart';
 
 void main() {
   runApp(const WinChatApp());
 }
 
 // Business Endpoint constants
-const String API_URL = "https://winnersonlineschool.com/API/winners_api.php"; // Update this to your actual PHP file name if different
+const String API_URL = "https://winnersonlineschool.com/API/send.php";
 const String RECEIVER = "SCH001";
 const int MAX_FILE_SIZE_MB = 100;
 
@@ -447,7 +447,7 @@ class _HomePageState extends State<HomePage> {
         "receiver": RECEIVER,
         "message": id,
         "parent_id": parentId,
-        "device_id": _deviceId, // <-- SENDING DEVICE ID HERE
+        "device_id": _deviceId,
       };
 
       final response = await http.post(
