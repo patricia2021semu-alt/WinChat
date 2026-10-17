@@ -9,13 +9,14 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:video_player/video_player.dart';
+import 'package:device_info_plus/device_info_plus.dart'; // <-- ADDED
 
 void main() {
   runApp(const WinChatApp());
 }
 
 // Business Endpoint constants
-const String API_URL = "https://winnersonlineschool.com/API/send.php";
+const String API_URL = "https://winnersonlineschool.com/API/winners_api.php"; // Update this to your actual PHP file name if different
 const String RECEIVER = "SCH001";
 const int MAX_FILE_SIZE_MB = 100;
 
@@ -215,52 +216,52 @@ class FileDownloadManager {
   }) async {
     final dir = await getDownloadDir();
     final savePath = join(dir, filename);
-
+    
     int attempts = 0;
     while (attempts < maxRetries) {
       try {
         attempts++;
-
+        
         final client = HttpClient();
         client.connectionTimeout = const Duration(seconds: 60);
         client.idleTimeout = const Duration(seconds: 60);
-
+        
         try {
           final request = await client.getUrl(Uri.parse(url));
           request.headers.add('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
           request.headers.add('Accept', '*/*');
           request.headers.add('Connection', 'keep-alive');
-
+          
           final response = await request.close();
-
+          
           if (response.statusCode != 200) {
             throw Exception('HTTP Error ${response.statusCode}');
           }
-
+          
           final contentLength = response.contentLength;
           final file = File(savePath);
           final sink = file.openWrite();
-
+          
           int received = 0;
           await for (final chunk in response) {
             sink.add(chunk);
             received += chunk.length;
-
+            
             if (contentLength > 0) {
               onProgress(received / contentLength);
             }
           }
-
+          
           await sink.flush();
           await sink.close();
-
+          
           if (contentLength > 0 && received < contentLength) {
             throw Exception('Incomplete download');
           }
-
+          
           client.close();
           return;
-
+          
         } catch (e) {
           client.close();
           rethrow;
@@ -315,6 +316,9 @@ class _HomePageState extends State<HomePage> {
   bool _isEditingAccount = false;
   String _currentPhone = "";
   bool _isLoading = false;
+  
+  // Device ID variable
+  String _deviceId = "";
 
   @override
   void initState() {
@@ -332,6 +336,25 @@ class _HomePageState extends State<HomePage> {
   Future<void> _initializeApp() async {
     await _initDatabase();
     await FileDownloadManager.getDownloadDir();
+    
+    // Generate Device ID
+    final DeviceInfoPlugin deviceInfo = DeviceInfoPlugin();
+    try {
+      if (Platform.isAndroid) {
+        final androidInfo = await deviceInfo.androidInfo;
+        _deviceId = androidInfo.id; 
+      } else if (Platform.isIOS) {
+        final iosInfo = await deviceInfo.iosInfo;
+        _deviceId = iosInfo.identifierForVendor ?? "unknown_ios";
+      } else {
+        _deviceId = "unknown_device";
+      }
+    } catch (e) {
+      debugPrint("Error getting device ID: $e");
+      _deviceId = "error_device";
+    }
+    debugPrint("DEVICE ID: $_deviceId");
+
     _currentPhone = await _getSender() ?? "";
 
     if (_currentPhone.isEmpty) {
@@ -372,12 +395,12 @@ class _HomePageState extends State<HomePage> {
   Future<void> _loadCachedHome() async {
     SharedPreferences prefs = await SharedPreferences.getInstance();
     String? homeId = prefs.getString('winchat_home_screen');
-
+    
     ScreenRecord? home;
     if (homeId != null) {
       home = await DatabaseHelper.getScreen(homeId);
     }
-
+    
     if (home == null) {
       var roots = await DatabaseHelper.getChildren(null);
       if (roots.isEmpty) return;
@@ -424,6 +447,7 @@ class _HomePageState extends State<HomePage> {
         "receiver": RECEIVER,
         "message": id,
         "parent_id": parentId,
+        "device_id": _deviceId, // <-- SENDING DEVICE ID HERE
       };
 
       final response = await http.post(
@@ -650,7 +674,7 @@ class _HomePageState extends State<HomePage> {
     required String screenId,
   }) {
     List<Widget> widgets = [];
-
+    
     if (type == "video" && content != null && content['url'] != null) {
       widgets.add(_buildVideoBubble(content['url'].toString(), title));
       return widgets;
@@ -661,7 +685,7 @@ class _HomePageState extends State<HomePage> {
       widgets.add(_buildImageDownloadBubble(content['url'].toString(), title));
       return widgets;
     }
-
+    
     List<String> lines = message.split('\n');
     List<String> urls = [];
     List<String> textLines = [];
@@ -690,13 +714,13 @@ class _HomePageState extends State<HomePage> {
     for (String url in urls) {
       Uri? uri = Uri.tryParse(url);
       String path = uri?.path.toLowerCase() ?? '';
-
+      
       if (path.endsWith('.mp4') || path.contains('video')) {
         widgets.add(_buildVideoBubble(url, title));
       } else if (path.endsWith('.pdf')) {
         widgets.add(_buildPdfDownloadBubble(url, title));
-      } else if (path.endsWith('.jpg') || path.endsWith('.jpeg') ||
-                 path.endsWith('.png') || path.endsWith('.gif') ||
+      } else if (path.endsWith('.jpg') || path.endsWith('.jpeg') || 
+                 path.endsWith('.png') || path.endsWith('.gif') || 
                  path.endsWith('.webp')) {
         widgets.add(_buildImageDownloadBubble(url, title));
       } else {
@@ -739,7 +763,7 @@ class _HomePageState extends State<HomePage> {
           future: FileDownloadManager.getLocalPath(filename),
           builder: (context, snapshot) {
             final isDownloaded = snapshot.hasData && snapshot.data != null;
-
+            
             return Align(
               alignment: Alignment.centerLeft,
               child: Container(
@@ -841,7 +865,7 @@ class _HomePageState extends State<HomePage> {
         double progress = 0.0;
         bool isDownloading = false;
         String? error;
-
+        
         return Align(
           alignment: Alignment.centerLeft,
           child: Container(
@@ -957,7 +981,7 @@ class _HomePageState extends State<HomePage> {
     try {
       final fileName = await FileDownloadManager.getFileNameFromUrl(url);
       await FileDownloadManager.downloadFile(
-        url,
+        url, 
         fileName,
         onProgress: (p) {
           if (mounted) {
@@ -1069,7 +1093,7 @@ class _HomePageState extends State<HomePage> {
             borderRadius: BorderRadius.circular(15),
           ),
           child: Text(
-            text,
+            text, 
             style: const TextStyle(color: Colors.red, fontSize: 12),
           ),
         )
@@ -1363,7 +1387,7 @@ class _VideoDownloadPlaceholderState extends State<_VideoDownloadPlaceholder> {
 
   Future<void> _startDownload() async {
     if (_isDownloading) return;
-
+    
     setState(() {
       _isDownloading = true;
       _progress = 0.0;
@@ -1392,7 +1416,7 @@ class _VideoDownloadPlaceholderState extends State<_VideoDownloadPlaceholder> {
           }
         },
       );
-
+      
       if (mounted) {
         setState(() {
           _progress = 1.0;
@@ -1638,7 +1662,7 @@ class _SocialVideoPlayerState extends State<_SocialVideoPlayer> with WidgetsBind
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.paused ||
+    if (state == AppLifecycleState.paused || 
         state == AppLifecycleState.inactive) {
       if (_isInitialized && _controller.value.isPlaying) {
         _controller.pause();
@@ -1660,12 +1684,12 @@ class _SocialVideoPlayerState extends State<_SocialVideoPlayer> with WidgetsBind
       setState(() {
         _isInitialized = true;
       });
-
+      
       await _controller.play();
       setState(() {
         _isPlaying = true;
       });
-
+      
       Future.delayed(const Duration(seconds: 3), () {
         if (mounted && _controller.value.isPlaying) {
           setState(() {
@@ -1673,7 +1697,7 @@ class _SocialVideoPlayerState extends State<_SocialVideoPlayer> with WidgetsBind
           });
         }
       });
-
+      
       _controller.addListener(() {
         if (!mounted) return;
         final playing = _controller.value.isPlaying;
@@ -1727,7 +1751,7 @@ class _SocialVideoPlayerState extends State<_SocialVideoPlayer> with WidgetsBind
     setState(() {
       _isFullScreen = !_isFullScreen;
     });
-
+    
     if (_isFullScreen) {
       await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
       await SystemChrome.setPreferredOrientations([
@@ -1802,8 +1826,8 @@ class _SocialVideoPlayerState extends State<_SocialVideoPlayer> with WidgetsBind
       );
     }
 
-    final aspectRatio = _controller.value.aspectRatio > 0
-        ? _controller.value.aspectRatio
+    final aspectRatio = _controller.value.aspectRatio > 0 
+        ? _controller.value.aspectRatio 
         : 16 / 9;
 
     if (_isFullScreen) {
@@ -1823,7 +1847,7 @@ class _SocialVideoPlayerState extends State<_SocialVideoPlayer> with WidgetsBind
                   child: VideoPlayer(_controller),
                 ),
               ),
-
+              
               if (_showControls) ...[
                 Positioned(
                   top: 0,
@@ -1855,7 +1879,7 @@ class _SocialVideoPlayerState extends State<_SocialVideoPlayer> with WidgetsBind
                     ),
                   ),
                 ),
-
+                
                 Positioned(
                   bottom: 0,
                   left: 0,
@@ -1947,7 +1971,7 @@ class _SocialVideoPlayerState extends State<_SocialVideoPlayer> with WidgetsBind
           child: Stack(
             children: [
               VideoPlayer(_controller),
-
+              
               if (_showControls) ...[
                 Center(
                   child: GestureDetector(
@@ -1971,7 +1995,7 @@ class _SocialVideoPlayerState extends State<_SocialVideoPlayer> with WidgetsBind
                     ),
                   ),
                 ),
-
+                
                 Positioned(
                   bottom: 0,
                   left: 0,
