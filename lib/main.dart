@@ -10,20 +10,25 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:video_player/video_player.dart';
 import 'package:device_info_plus/device_info_plus.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 
 void main() {
+  WidgetsFlutterBinding.ensureInitialized();
   runApp(const WinChatApp());
 }
 
 // ============ ENDPOINTS ============
-const String BASE_URL       = "https://selimw.com/API";
-const String API_URL        = "$BASE_URL/send.php";
-const String PROVIDERS_URL  = "$BASE_URL/providers.php";
+const String BASE_URL        = "https://selimw.com/API";
+const String API_URL         = "$BASE_URL/send.php";
+const String PROVIDERS_URL   = "$BASE_URL/providers.php";
 const int    MAX_FILE_SIZE_MB = 100;
 
 // Sentinel id used only in the breadcrumb for the HOME (picker) badge.
-// It is never sent to the server.
-const String HOME_PICKER_ID = "__HOME__";
+const String HOME_PICKER_ID  = "__HOME__";
+
+// ============ PREFS KEYS ============
+const String PREF_SENDER    = 'winchat_sender';
+const String PREF_PROVIDERS = 'winchat_last_providers';
 
 class WinChatApp extends StatelessWidget {
   const WinChatApp({super.key});
@@ -114,8 +119,10 @@ class Provider {
   final String name;
   Provider({required this.id, required this.name});
 
-  factory Provider.fromMap(Map<String, dynamic> m) =>
-      Provider(id: m['id'].toString(), name: m['name'].toString());
+  factory Provider.fromMap(Map<String, dynamic> m) => Provider(
+        id: m['id'].toString(),
+        name: m['name'].toString(),
+      );
 }
 
 // ---------- Database Helper ----------
@@ -195,11 +202,6 @@ class DatabaseHelper {
     }
     return result.map((row) => ScreenRecord.fromMap(row)).toList();
   }
-
-  static Future<void> clearCache() async {
-    final db = await database;
-    await db.delete('screens');
-  }
 }
 
 // ---------- File Download Manager ----------
@@ -229,8 +231,8 @@ class FileDownloadManager {
   }) async {
     final dir = await getDownloadDir();
     final savePath = join(dir, filename);
-
     int attempts = 0;
+
     while (attempts < maxRetries) {
       try {
         attempts++;
@@ -252,8 +254,7 @@ class FileDownloadManager {
 
           final contentLength = response.contentLength;
           if (contentLength > MAX_FILE_SIZE_MB * 1024 * 1024) {
-            throw Exception(
-                'File exceeds ${MAX_FILE_SIZE_MB}MB limit');
+            throw Exception('File exceeds ${MAX_FILE_SIZE_MB}MB limit');
           }
 
           final file = File(savePath);
@@ -270,7 +271,6 @@ class FileDownloadManager {
           if (contentLength > 0 && received < contentLength) {
             throw Exception('Incomplete download');
           }
-
           client.close();
           return;
         } catch (e) {
@@ -325,13 +325,11 @@ class _HomePageState extends State<HomePage> {
   bool _isEditingAccount = false;
   bool _isLoading = false;
   String _currentPhone = "";
-
-  // Server-managed: the school id chosen for this session.
-  String _receiver = "";
-  String _schoolName = "";
-
-  // Device fingerprint
   String _deviceId = "";
+
+  // Memory-only — NOT persisted. Every launch starts empty.
+  String _receiver = "";
+  String _providerName = "";
 
   @override
   void initState() {
@@ -353,7 +351,6 @@ class _HomePageState extends State<HomePage> {
     await DatabaseHelper.database;
     await FileDownloadManager.getDownloadDir();
 
-    // device id
     final DeviceInfoPlugin deviceInfo = DeviceInfoPlugin();
     try {
       if (Platform.isAndroid) {
@@ -371,13 +368,12 @@ class _HomePageState extends State<HomePage> {
 
     _currentPhone = await _getSender() ?? "";
 
-    // 1) phone gate
     if (_currentPhone.isEmpty) {
       if (!mounted) return;
       setState(() {
         _isWaitingForPhone = true;
         _navigationPath = [
-          NavigationItem(id: HOME_PICKER_ID, name: "HOME", parentId: null)
+          NavigationItem(id: HOME_PICKER_ID, name: "HOME", parentId: null),
         ];
         _chatMessages = [
           _buildServerBubble("Please enter your phone number to continue:"),
@@ -386,35 +382,39 @@ class _HomePageState extends State<HomePage> {
       return;
     }
 
-    // 2) always show the school picker on launch
     await _loadProviders();
   }
 
   Future<String?> _getSender() async {
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getString('winchat_sender');
+    return prefs.getString(PREF_SENDER);
   }
 
   Future<void> _setSender(String phone) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('winchat_sender', phone);
+    await prefs.setString(PREF_SENDER, phone);
     _currentPhone = phone;
   }
 
+  Future<bool> _isOnline() async {
+    try {
+      final results = await Connectivity().checkConnectivity();
+      return results.any((r) => r != ConnectivityResult.none);
+    } catch (_) {
+      return false;
+    }
+  }
+
   // ================================================================
-  // GENERIC REQUEST  (the ONLY place HTTP happens for send.php)
+  // GENERIC REQUEST — only place content HTTP happens
   // ================================================================
-  /// Caller decides 'message' and optionally 'parentId'.
-  /// The function builds the generic payload, POSTs, updates
-  /// _receiver/_schoolName from the server response, and returns
-  /// the raw map for the caller to render.
   Future<Map<String, dynamic>?> _requestServer(
     String message, {
     String? parentId,
   }) async {
     if (_isSending) return null;
     if (_receiver.isEmpty) {
-      _addErrorMessage("Please choose a school first.");
+      _addErrorMessage("Please choose a provider first.");
       return null;
     }
 
@@ -450,17 +450,17 @@ class _HomePageState extends State<HomePage> {
         return null;
       }
 
-      // apply server-decided values
-      final respReceiver = data["receiver"]?.toString() ?? "";
-      final respSchool = data["school_name"]?.toString() ?? "";
-      if (respReceiver.isNotEmpty) _receiver = respReceiver;
-      if (respSchool.isNotEmpty) _schoolName = respSchool;
+      final respName = data["provider_name"]?.toString() ??
+          data["school_name"]?.toString() ??
+          "";
+      if (respName.isNotEmpty && respName != _providerName) {
+        _providerName = respName;
+      }
 
       return data;
     } catch (e) {
       setState(() => _isLoading = false);
       debugPrint("send error: $e");
-      // fall back to cache
       final cached = await DatabaseHelper.getScreen(message);
       if (cached != null) {
         _renderFromCache(cached);
@@ -474,61 +474,102 @@ class _HomePageState extends State<HomePage> {
   }
 
   // ================================================================
-  // PROVIDERS (school list)
+  // PROVIDERS
   // ================================================================
   Future<void> _loadProviders() async {
     setState(() {
       _receiver = "";
-      _schoolName = "";
+      _providerName = "";
       _isLoading = true;
       _navigationPath = [
-        NavigationItem(id: HOME_PICKER_ID, name: "HOME", parentId: null)
+        NavigationItem(id: HOME_PICKER_ID, name: "HOME", parentId: null),
       ];
-      _chatMessages = [
-        _buildServerBubble("Welcome! Please choose your school:"),
-      ];
+      _chatMessages = [];
     });
 
-    try {
-      final response = await http
-          .post(
-            Uri.parse(PROVIDERS_URL),
-            headers: {"Content-Type": "application/json"},
-            body: jsonEncode({"device_id": _deviceId}),
-          )
-          .timeout(const Duration(seconds: 15));
+    final online = await _isOnline();
 
-      final data = jsonDecode(utf8.decode(response.bodyBytes));
-      if (data["success"] != true || data["providers"] is! List) {
-        throw Exception(data["message"] ?? "Failed to load schools");
+    if (online) {
+      try {
+        final response = await http
+            .post(
+              Uri.parse(PROVIDERS_URL),
+              headers: {"Content-Type": "application/json"},
+              body: jsonEncode({"device_id": _deviceId}),
+            )
+            .timeout(const Duration(seconds: 15));
+
+        final raw = utf8.decode(response.bodyBytes);
+        final data = jsonDecode(raw) as Map<String, dynamic>;
+
+        if (data["success"] != true || data["providers"] is! List) {
+          throw Exception(data["message"] ?? "Failed to load providers");
+        }
+
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString(PREF_PROVIDERS, raw);
+
+        _renderProviderPicker(data);
+        return;
+      } catch (e) {
+        debugPrint("providers fetch failed: $e");
       }
+    }
 
-      final providers = (data["providers"] as List)
-          .map((e) => Provider.fromMap(Map<String, dynamic>.from(e)))
-          .toList();
+    final prefs = await SharedPreferences.getInstance();
+    final cached = prefs.getString(PREF_PROVIDERS);
 
+    if (cached == null) {
       if (!mounted) return;
       setState(() {
         _isLoading = false;
         _chatMessages = [
-          ..._chatMessages,
-          ...providers.map(_buildProviderBubble),
+          _buildServerBubble(
+            online
+                ? "Could not load the list. Please try again."
+                : "You're offline and we don't have a saved list yet. "
+                    "Please connect to the internet and reopen the app.",
+          ),
         ];
       });
-      _scrollToBottom();
-    } catch (e) {
-      if (!mounted) return;
-      setState(() => _isLoading = false);
-      _addErrorMessage(
-          "Could not load schools: ${e.toString().replaceFirst('Exception: ', '')}");
-      setState(() {
-        _chatMessages = [
-          ..._chatMessages,
-          _buildRetryBubble(_loadProviders),
-        ];
-      });
-      _scrollToBottom();
+      return;
     }
+
+    try {
+      final data = jsonDecode(cached) as Map<String, dynamic>;
+      _renderProviderPicker(data, offline: true);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _isLoading = false;
+        _chatMessages = [
+          _buildServerBubble("Could not load the saved list."),
+        ];
+      });
+    }
+  }
+
+  void _renderProviderPicker(Map<String, dynamic> data,
+      {bool offline = false}) {
+    final title = data["title"]?.toString() ?? "";
+    final providers = (data["providers"] as List)
+        .whereType<Map>()
+        .map((e) => Provider.fromMap(Map<String, dynamic>.from(e)))
+        .toList();
+
+    if (!mounted) return;
+    setState(() {
+      _isLoading = false;
+      _chatMessages = [
+        if (title.isNotEmpty) _buildServerBubble(title),
+        if (offline)
+          _buildServerBubble("(Offline — showing the last saved list)"),
+        ...providers.map(_buildProviderBubble),
+        if (providers.isEmpty)
+          _buildServerBubble("No providers are available right now."),
+      ];
+    });
+    _scrollToBottom();
   }
 
   Widget _buildProviderBubble(Provider p) {
@@ -553,7 +594,7 @@ class _HomePageState extends State<HomePage> {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.school, size: 18),
+              const Icon(Icons.business, size: 18),
               const SizedBox(width: 10),
               Flexible(
                 child: Text(
@@ -571,31 +612,10 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Widget _buildRetryBubble(VoidCallback onRetry) {
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: GestureDetector(
-        onTap: onRetry,
-        child: Container(
-          margin: const EdgeInsets.only(bottom: 8),
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-          decoration: BoxDecoration(
-            color: Colors.black,
-            borderRadius: BorderRadius.circular(17),
-          ),
-          child: const Text(
-            "Tap to retry",
-            style: TextStyle(color: Colors.white, fontSize: 13),
-          ),
-        ),
-      ),
-    );
-  }
-
   Future<void> _selectProvider(Provider p) async {
     setState(() {
       _receiver = p.id;
-      _schoolName = p.name;
+      _providerName = p.name;
       _chatMessages = [
         ..._chatMessages,
         _buildServerBubble("Loading ${p.name}..."),
@@ -607,16 +627,13 @@ class _HomePageState extends State<HomePage> {
     if (data != null) {
       await _renderScreen(data);
     } else {
-      // server failed — try cache
       final cached = await DatabaseHelper.getScreen("HOME");
-      if (cached != null) {
-        _renderFromCache(cached);
-      }
+      if (cached != null) _renderFromCache(cached);
     }
   }
 
   // ================================================================
-  // RENDER HELPERS
+  // RENDER
   // ================================================================
   Future<void> _renderScreen(Map<String, dynamic> data) async {
     final screenId = data["screen_id"]?.toString() ?? "";
@@ -644,12 +661,10 @@ class _HomePageState extends State<HomePage> {
       ));
     }
 
-    // build breadcrumb from cache + HOME badge at the front
     List<NavigationItem> path = [];
     if (screenId.isNotEmpty) {
       path = await _buildPathFromCache(screenId);
     }
-
     if (path.isEmpty || path.first.id != HOME_PICKER_ID) {
       path.insert(
         0,
@@ -676,8 +691,7 @@ class _HomePageState extends State<HomePage> {
     final finalPath = path.isNotEmpty && path.first.id == HOME_PICKER_ID
         ? path
         : [
-            NavigationItem(
-                id: HOME_PICKER_ID, name: "HOME", parentId: null),
+            NavigationItem(id: HOME_PICKER_ID, name: "HOME", parentId: null),
             ...path,
           ];
 
@@ -714,16 +728,18 @@ class _HomePageState extends State<HomePage> {
   }
 
   // ================================================================
-  // BREADCRUMB TAP
+  // BREADCRUMB
   // ================================================================
   Future<void> _handleBreadcrumbTap(NavigationItem item) async {
     if (item.id == HOME_PICKER_ID) {
+      setState(() {
+        _receiver = "";
+        _providerName = "";
+      });
       await _loadProviders();
       return;
     }
-    // if it's the last badge, do nothing
-    if (_navigationPath.isNotEmpty &&
-        _navigationPath.last.id == item.id) {
+    if (_navigationPath.isNotEmpty && _navigationPath.last.id == item.id) {
       return;
     }
     await _navigateLocal(item.id);
@@ -740,7 +756,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   // ================================================================
-  // SEND (user typed text)
+  // SEND
   // ================================================================
   Future<void> _sendMessage() async {
     final msg = _inputController.text.trim();
@@ -751,12 +767,10 @@ class _HomePageState extends State<HomePage> {
       _showAccountMenu();
       return;
     }
-
     if (_isEditingAccount) {
       _handleAccountMenuSelection(msg);
       return;
     }
-
     if (_isWaitingForPhone) {
       if (msg.length < 10) {
         _addErrorMessage(
@@ -772,13 +786,11 @@ class _HomePageState extends State<HomePage> {
       await _loadProviders();
       return;
     }
-
     if (_receiver.isEmpty) {
-      _addErrorMessage("Please choose a school first.");
+      _addErrorMessage("Please choose a provider first.");
       return;
     }
 
-    // show user bubble
     setState(() {
       _chatMessages = [
         ..._chatMessages,
@@ -808,13 +820,11 @@ class _HomePageState extends State<HomePage> {
         .lastOrNull
         ?.id;
     final data = await _requestServer(msg, parentId: parentId);
-    if (data != null) {
-      await _renderScreen(data);
-    }
+    if (data != null) await _renderScreen(data);
   }
 
   // ================================================================
-  // ACCOUNT MENU (#123#)
+  // ACCOUNT MENU
   // ================================================================
   void _showAccountMenu() {
     setState(() {
@@ -1199,7 +1209,7 @@ class _HomePageState extends State<HomePage> {
       body: SafeArea(
         child: Column(
           children: [
-            // ---- header with tappable school chip ----
+            // HEADER (empty right side until provider selected)
             Container(
               height: 48,
               padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -1212,9 +1222,8 @@ class _HomePageState extends State<HomePage> {
                       style: TextStyle(
                           fontWeight: FontWeight.bold, fontSize: 17)),
                   const Spacer(),
-                  GestureDetector(
-                    onTap: _loadProviders,
-                    child: Container(
+                  if (_providerName.isNotEmpty)
+                    Container(
                       padding: const EdgeInsets.symmetric(
                           horizontal: 10, vertical: 4),
                       decoration: BoxDecoration(
@@ -1226,16 +1235,12 @@ class _HomePageState extends State<HomePage> {
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          const Icon(Icons.swap_horiz, size: 14),
-                          const SizedBox(width: 4),
                           ConstrainedBox(
                             constraints:
-                                const BoxConstraints(maxWidth: 140),
+                                const BoxConstraints(maxWidth: 180),
                             child: Text(
-                              _schoolName.isEmpty
-                                  ? "Choose school"
-                                  : _schoolName,
-                              style: const TextStyle(fontSize: 11),
+                              _providerName,
+                              style: const TextStyle(fontSize: 12),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                             ),
@@ -1243,12 +1248,11 @@ class _HomePageState extends State<HomePage> {
                         ],
                       ),
                     ),
-                  ),
                 ],
               ),
             ),
 
-            // ---- chat list ----
+            // CHAT LIST
             Expanded(
               child: ListView(
                 controller: _scrollController,
@@ -1260,7 +1264,7 @@ class _HomePageState extends State<HomePage> {
               ),
             ),
 
-            // ---- bottom bar: breadcrumb + input ----
+            // BOTTOM: breadcrumb + input
             Container(
               color: Colors.white,
               child: Column(
@@ -1642,7 +1646,6 @@ class _VideoDownloadPlaceholderState extends State<_VideoDownloadPlaceholder> {
           }
         },
       );
-
       if (mounted) {
         setState(() => _progress = 1.0);
         await Future.delayed(const Duration(milliseconds: 300));
@@ -1824,7 +1827,7 @@ class _VideoDownloadPlaceholderState extends State<_VideoDownloadPlaceholder> {
   }
 }
 
-// ---------- Video player (unchanged from your original) ----------
+// ---------- Video player ----------
 class _SocialVideoPlayer extends StatefulWidget {
   final String filePath;
   const _SocialVideoPlayer({required this.filePath});
@@ -1981,8 +1984,9 @@ class _SocialVideoPlayerState extends State<_SocialVideoPlayer>
       );
     }
 
-    final aspectRatio =
-        _controller.value.aspectRatio > 0 ? _controller.value.aspectRatio : 16 / 9;
+    final aspectRatio = _controller.value.aspectRatio > 0
+        ? _controller.value.aspectRatio
+        : 16 / 9;
 
     if (_isFullScreen) {
       return Scaffold(
